@@ -38,6 +38,9 @@ pub(crate) struct PoolConfig {
     /// Per-query tracing configuration applied to each connection the
     /// pool creates.
     pub(crate) query_log: QueryLogConfig,
+    /// Run operations on the caller's task instead of a task per connection
+    /// (see [`Builder::inline_connections`](super::Builder::inline_connections)).
+    pub(crate) inline: bool,
 }
 
 impl Default for PoolConfig {
@@ -50,6 +53,7 @@ impl Default for PoolConfig {
             max_connection_lifetime: None,
             max_connection_idle_time: None,
             query_log: QueryLogConfig::default(),
+            inline: false,
         }
     }
 }
@@ -108,6 +112,7 @@ impl Pool {
             max_connection_lifetime: config.max_connection_lifetime,
             max_connection_idle_time: config.max_connection_idle_time,
             connect_cx,
+            inline: config.inline,
         })
         .runtime(deadpool::Runtime::Tokio1)
         .max_size(effective_max)
@@ -175,6 +180,7 @@ pub(super) struct Manager {
     engine: Engine,
     sweep_waker: Arc<SweepWaker>,
     pre_ping: bool,
+    inline: bool,
     // Enforcing these caps needs the connection's age, which deadpool only
     // tracks off wasm32 (`std::time::Instant` has no wasm32 implementation).
     #[cfg_attr(
@@ -213,11 +219,12 @@ impl deadpool::managed::Manager for Manager {
             .inspect_err(|e| {
                 tracing::debug!(error = %e, "failed to create database connection");
             })?;
-        Ok(ConnectionHandle::spawn(
-            connection,
-            self.engine.clone(),
-            self.sweep_waker.clone(),
-        ))
+        let (engine, sweep_waker) = (self.engine.clone(), self.sweep_waker.clone());
+        Ok(if self.inline {
+            ConnectionHandle::inline(connection, engine, sweep_waker)
+        } else {
+            ConnectionHandle::spawn(connection, engine, sweep_waker)
+        })
     }
 
     async fn recycle(
@@ -250,7 +257,7 @@ impl deadpool::managed::Manager for Manager {
                 "connection exceeded max idle time",
             ));
         }
-        if obj.in_tx.is_closed() || obj.is_finished() {
+        if obj.is_closed() {
             tracing::debug!("discarding dead pooled connection");
             return Err(deadpool::managed::RecycleError::message(
                 "background task is no longer running",
@@ -262,7 +269,7 @@ impl deadpool::managed::Manager for Manager {
                 span: tracing::Span::current(),
                 tx,
             };
-            if obj.in_tx.send(ping).is_err() {
+            if obj.send(ping).await.is_err() {
                 tracing::debug!("pre-ping channel closed; discarding pooled connection");
                 return Err(deadpool::managed::RecycleError::message(
                     "background task is no longer running",
@@ -436,7 +443,7 @@ impl SweepTask {
             span: tracing::Span::current(),
             tx,
         };
-        if handle.in_tx.send(ping).is_err() {
+        if handle.send(ping).await.is_err() {
             return false;
         }
         match tokio::time::timeout(DEFAULT_SWEEP_PING_TIMEOUT, rx).await {

@@ -125,9 +125,15 @@ pub async fn rollback_failure_retries_before_connection_reuse(t: &mut Test) -> R
     Ok(())
 }
 
-/// Cancelling a queued commit keeps the connection reusable.
+/// Cancelling a queued commit keeps the connection reusable. Needs the pool's
+/// connection tasks, where the commit waits in a queue (inline connections
+/// run it at once).
 #[driver_test(requires(sql))]
 pub async fn cancel_queued_commit_keeps_connection_reusable(t: &mut Test) -> Result<()> {
+    if !t.capability().test_connection_pool {
+        return Ok(());
+    }
+
     #[derive(Debug, toasty::Model)]
     struct Item {
         #[key]

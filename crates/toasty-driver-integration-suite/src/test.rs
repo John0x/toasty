@@ -74,7 +74,8 @@ impl Test {
         // Set the table prefix
         builder.table_name_prefix(&self.isolate.table_prefix());
 
-        // Apply caller customizations
+        // Apply the setup's configuration, then the caller's customizations
+        self.setup.configure(&mut builder);
         customize(&mut builder);
 
         // Always wrap with the instrumented test driver

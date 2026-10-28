@@ -8,4 +8,11 @@ pub trait Setup: Send + Sync + 'static {
     /// Delete the table with the specified name. This is used by the test
     /// runner to cleanup after itself.
     async fn delete_table(&self, name: &str);
+
+    /// Configure the database builder before each test's database is built
+    /// (e.g. `inline_connections` for a driver that needs it). Nothing by
+    /// default.
+    fn configure(&self, builder: &mut toasty::db::Builder) {
+        let _ = builder;
+    }
 }

@@ -7,8 +7,16 @@
 //! access to the underlying driver connection — drivers are not
 //! required to be `Sync` on `exec` — and gives the connection its own
 //! lifecycle independent of the pool object that holds the handle.
+//!
+//! With [`Builder::inline_connections`](crate::db::Builder::inline_connections),
+//! there is no task: the caller runs the operation itself, on its own task,
+//! holding the connection's lock. Drivers whose statements depend on the
+//! caller's task-local context (its transaction, its span) need this.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use toasty_core::driver::operation::RawSql;
 use toasty_core::driver::{Connection, Rows};
@@ -80,13 +88,27 @@ pub(crate) enum ConnectionOperation {
     },
 }
 
-/// Handle to a dedicated connection task.
-///
-/// When dropped, `in_tx` closes the channel, causing the background task to
-/// finish processing remaining messages and exit gracefully.
+/// Handle to a connection: a dedicated connection task, or a connection its
+/// callers run operations on themselves (inline).
 pub(crate) struct ConnectionHandle {
-    pub(crate) in_tx: mpsc::UnboundedSender<ConnectionOperation>,
-    join_handle: JoinHandle<()>,
+    mode: Mode,
+}
+
+enum Mode {
+    /// When dropped, `in_tx` closes the channel, causing the background task
+    /// to finish processing remaining messages and exit gracefully.
+    Task {
+        in_tx: mpsc::UnboundedSender<ConnectionOperation>,
+        join_handle: JoinHandle<()>,
+    },
+    Inline {
+        task: tokio::sync::Mutex<ConnectionTask>,
+        /// Set once the connection went bad.
+        closed: Arc<AtomicBool>,
+        /// Operations sent without waiting (a dropped transaction's
+        /// rollback): they run before the next one.
+        detached: Mutex<Vec<ConnectionOperation>>,
+    },
 }
 
 impl ConnectionHandle {
@@ -104,25 +126,97 @@ impl ConnectionHandle {
         let task = ConnectionTask {
             connection,
             engine,
-            in_rx,
+            in_rx: Some(in_rx),
+            closed: Arc::default(),
             sweep_waker,
         };
         let join_handle = tokio::spawn(task.run());
-        Self { in_tx, join_handle }
+        Self {
+            mode: Mode::Task { in_tx, join_handle },
+        }
     }
 
-    /// Returns true once the worker task has exited. Used by the pool's
-    /// `recycle` to detect dead slots.
-    pub(crate) fn is_finished(&self) -> bool {
-        self.join_handle.is_finished()
+    /// A connection whose operations run on the task sending them.
+    pub(crate) fn inline(
+        connection: Box<dyn Connection>,
+        engine: Engine,
+        sweep_waker: Arc<SweepWaker>,
+    ) -> Self {
+        let closed = Arc::new(AtomicBool::new(false));
+        let task = ConnectionTask {
+            connection,
+            engine,
+            in_rx: None,
+            closed: closed.clone(),
+            sweep_waker,
+        };
+        Self {
+            mode: Mode::Inline {
+                task: tokio::sync::Mutex::new(task),
+                closed,
+                detached: Mutex::default(),
+            },
+        }
+    }
+
+    /// Runs `op`: sends it to the connection task, or runs it on this task.
+    /// Its response goes to the operation's `tx`. Fails if the connection is
+    /// gone.
+    pub(crate) async fn send(&self, op: ConnectionOperation) -> Result<(), ConnectionGone> {
+        match &self.mode {
+            Mode::Task { in_tx, .. } => in_tx.send(op).map_err(|_| ConnectionGone),
+            Mode::Inline {
+                task,
+                closed,
+                detached,
+            } => {
+                let mut task = task.lock().await;
+                let detached =
+                    std::mem::take(&mut *detached.lock().unwrap_or_else(|e| e.into_inner()));
+                for op in detached.into_iter().chain([op]) {
+                    if closed.load(Ordering::Acquire) {
+                        return Err(ConnectionGone);
+                    }
+                    task.handle(op).await;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Sends `op` without waiting for it to run: to the connection task, or,
+    /// inline, to run before the next operation.
+    pub(crate) fn send_detached(&self, op: ConnectionOperation) {
+        match &self.mode {
+            Mode::Task { in_tx, .. } => {
+                let _ = in_tx.send(op);
+            }
+            Mode::Inline { detached, .. } => {
+                detached.lock().unwrap_or_else(|e| e.into_inner()).push(op);
+            }
+        }
+    }
+
+    /// Returns true once the connection can't run operations anymore: its
+    /// task exited, or it went bad. Used by the pool's `recycle` to detect
+    /// dead slots.
+    pub(crate) fn is_closed(&self) -> bool {
+        match &self.mode {
+            Mode::Task { in_tx, join_handle } => in_tx.is_closed() || join_handle.is_finished(),
+            Mode::Inline { closed, .. } => closed.load(Ordering::Acquire),
+        }
     }
 }
+
+/// The connection's task (or inline connection) is gone.
+#[derive(Debug)]
+pub(crate) struct ConnectionGone;
 
 impl std::fmt::Debug for ConnectionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionHandle")
-            .field("channel_closed", &self.in_tx.is_closed())
-            .field("task_finished", &self.join_handle.is_finished())
+            .field("inline", &matches!(self.mode, Mode::Inline { .. }))
+            .field("closed", &self.is_closed())
             .finish()
     }
 }
@@ -130,16 +224,25 @@ impl std::fmt::Debug for ConnectionHandle {
 /// Owns one database connection and serializes operations against it.
 /// Spawned by [`ConnectionHandle::spawn`]; runs until `in_rx` closes
 /// (sender side dropped) or the connection reports `is_valid() == false`.
+/// Inline, it has no `in_rx`: its callers run [`handle`](Self::handle).
 struct ConnectionTask {
     connection: Box<dyn Connection>,
     engine: Engine,
-    in_rx: mpsc::UnboundedReceiver<ConnectionOperation>,
+    in_rx: Option<mpsc::UnboundedReceiver<ConnectionOperation>>,
+    /// Set once the connection went bad (for inline connections).
+    closed: Arc<AtomicBool>,
     sweep_waker: Arc<SweepWaker>,
 }
 
 impl ConnectionTask {
     async fn run(mut self) {
-        while let Some(op) = self.in_rx.recv().await {
+        while let Some(op) = self
+            .in_rx
+            .as_mut()
+            .expect("a spawned task's channel")
+            .recv()
+            .await
+        {
             if !self.handle(op).await {
                 return;
             }
@@ -246,8 +349,8 @@ impl ConnectionTask {
     }
 
     /// Send `result` to the caller, but if the connection reported
-    /// invalid during the op, close `in_rx` *first* so the mpsc transitions
-    /// to closed synchronously. A consumer woken by the response that then
+    /// invalid during the op, close `in_rx` (or mark the inline connection
+    /// closed) *first* so the mpsc transitions to closed synchronously. A consumer woken by the response that then
     /// re-enters the pool sees `in_tx.is_closed() == true` in
     /// `Manager::recycle` and the slot is evicted — no race with this
     /// task's exit. Returns whether the task should keep running.
@@ -264,7 +367,10 @@ impl ConnectionTask {
             true
         } else {
             tracing::debug!("connection reported invalid; closing channel and exiting");
-            self.in_rx.close();
+            if let Some(in_rx) = &mut self.in_rx {
+                in_rx.close();
+            }
+            self.closed.store(true, Ordering::Release);
             self.sweep_waker.wake();
             let _ = tx.send(result);
             false

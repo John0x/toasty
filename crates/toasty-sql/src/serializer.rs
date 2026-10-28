@@ -55,6 +55,10 @@ pub struct Serializer<'a> {
     /// [`Self::sqlite_with_default_begin`]. The non-`Default` variants
     /// (`Deferred`, `Immediate`, `Exclusive`) always emit fixed SQL.
     sqlite_default_begin: &'static str,
+
+    /// The types written on the bind parameters' placeholders, by position
+    /// (see [`Self::with_arg_types`]).
+    arg_types: Option<&'a [db::Type]>,
 }
 
 struct Formatter<'a> {

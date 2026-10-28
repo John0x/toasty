@@ -249,6 +249,13 @@ impl ToSql for &stmt::Expr {
                 f.arg_positions.push(arg.position);
                 let placeholder = super::Placeholder(arg.position + 1);
                 fmt!(f, placeholder);
+                if let Some(ty) = f
+                    .serializer
+                    .arg_types
+                    .and_then(|types| types.get(arg.position))
+                {
+                    fmt!(f, "::" ty);
+                }
             }
             stmt::Expr::Default => match f.serializer.dialect {
                 Dialect::Postgresql | Dialect::Mysql | Dialect::MariaDb => fmt!(f, "DEFAULT"),

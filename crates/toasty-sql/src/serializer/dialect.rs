@@ -24,6 +24,7 @@ impl<'a> Serializer<'a> {
             schema,
             dialect: Dialect::Sqlite,
             sqlite_default_begin: default_begin,
+            arg_types: None,
         }
     }
 
@@ -38,6 +39,7 @@ impl<'a> Serializer<'a> {
             schema,
             dialect: Dialect::Postgresql,
             sqlite_default_begin: "BEGIN",
+            arg_types: None,
         }
     }
 
@@ -47,6 +49,7 @@ impl<'a> Serializer<'a> {
             schema,
             dialect: Dialect::Mysql,
             sqlite_default_begin: "BEGIN",
+            arg_types: None,
         }
     }
 
@@ -56,7 +59,17 @@ impl<'a> Serializer<'a> {
             schema,
             dialect: Dialect::MariaDb,
             sqlite_default_begin: "BEGIN",
+            arg_types: None,
         }
+    }
+
+    /// Writes each bind parameter's type on its placeholder (`$1::UUID`), from
+    /// `types` by position: PostgreSQL then doesn't infer it, for drivers that
+    /// send parameters as untyped text. PostgreSQL only.
+    pub fn with_arg_types(mut self, types: &'a [db::Type]) -> Self {
+        debug_assert!(matches!(self.dialect, Dialect::Postgresql));
+        self.arg_types = Some(types);
+        self
     }
 
     /// Returns `true` for both MySQL and MariaDB.

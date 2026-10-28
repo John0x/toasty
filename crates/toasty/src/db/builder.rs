@@ -56,6 +56,19 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Run each connection's operations on the task that sends them, instead
+    /// of a background task per connection.
+    ///
+    /// For drivers whose statements depend on the caller's task: its
+    /// task-local context (a transaction it opened outside Toasty, its span),
+    /// or a runtime that isn't Tokio's. A connection is still used by one
+    /// caller at a time; a dropped transaction's rollback runs before the
+    /// connection's next operation.
+    pub fn inline_connections(&mut self) -> &mut Self {
+        self.pool.inline = true;
+        self
+    }
+
     /// Set the models whose schemas will be included when the database is
     /// built. Related and embedded models are discovered automatically through
     /// field traversal, so you only need to list your entry-point models.

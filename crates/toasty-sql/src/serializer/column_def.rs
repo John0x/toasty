@@ -6,7 +6,13 @@ impl ToSql for &stmt::ColumnDef {
     fn to_sql(self, f: &mut super::Formatter<'_>) {
         let name = Ident(&self.name);
 
-        fmt!(f, name " " self.ty);
+        // SQLite's `AUTOINCREMENT` requires the declared type `INTEGER`,
+        // which is 64-bit: any integer key is spelled that way.
+        if self.auto_increment && f.serializer.dialect == Dialect::Sqlite {
+            fmt!(f, name " INTEGER");
+        } else {
+            fmt!(f, name " " self.ty);
+        }
 
         if self.not_null {
             fmt!(f, " NOT NULL");

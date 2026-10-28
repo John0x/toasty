@@ -125,17 +125,19 @@ impl LowerStatement<'_, '_> {
                 let expr = source.take_source_field(field.id);
                 if expr.is_value_null() || expr.is_default() {
                     if !field.nullable && field.ty.is_has_one() {
-                        panic!(
-                            "Insert missing non-nullable field; model={}; name={:#?}; ty={:#?}; expr={:#?}",
-                            self.schema()
-                                .app
-                                .model(field.id.model)
-                                .name()
-                                .upper_camel_case(),
-                            field.name,
-                            field.ty,
-                            expr
-                        );
+                        // The caller's mistake, not the engine's: an error, not a panic.
+                        let model = self
+                            .schema()
+                            .app
+                            .model(field.id.model)
+                            .name()
+                            .upper_camel_case();
+                        let name = field.name.app.as_deref().unwrap_or("?");
+                        self.state
+                            .errors
+                            .push(crate::Error::invalid_statement(format!(
+                                "insert missing the required has_one field `{name}` of {model}"
+                            )));
                     }
                     continue;
                 }

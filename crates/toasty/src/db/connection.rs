@@ -74,13 +74,13 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
 
         self.handle()
-            .in_tx
             .send(ConnectionOperation::ExecStatement {
                 stmt: Box::new(stmt),
                 in_transaction,
                 span: span.clone(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("exec statement channel closed"))?;
 
         rx.instrument(span)
@@ -92,12 +92,12 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
 
         self.handle()
-            .in_tx
             .send(ConnectionOperation::ExecOperation {
                 operation: Box::new(operation),
                 span: tracing::Span::current(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("exec operation channel closed"))?;
 
         rx.await
@@ -110,12 +110,12 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
 
         self.handle()
-            .in_tx
             .send(ConnectionOperation::ExecRawSql {
                 raw: Box::new(raw),
                 span: span.clone(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("exec raw sql channel closed"))?;
 
         rx.instrument(span)
@@ -147,11 +147,11 @@ impl Connection {
         tracing::info!("pushing schema to database");
         let (tx, rx) = oneshot::channel();
         self.handle()
-            .in_tx
             .send(ConnectionOperation::PushSchema {
                 span: tracing::Span::current(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("push schema channel closed"))?;
         rx.await
             .map_err(|_| worker_gone("push schema worker dropped without replying"))?
@@ -161,11 +161,11 @@ impl Connection {
     pub(crate) async fn applied_migrations(&self) -> crate::Result<Vec<AppliedMigration>> {
         let (tx, rx) = oneshot::channel();
         self.handle()
-            .in_tx
             .send(ConnectionOperation::AppliedMigrations {
                 span: tracing::Span::current(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("applied migrations channel closed"))?;
         rx.await
             .map_err(|_| worker_gone("applied migrations worker dropped without replying"))?
@@ -180,7 +180,6 @@ impl Connection {
     ) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.handle()
-            .in_tx
             .send(ConnectionOperation::ApplyMigration {
                 id,
                 name: name.to_owned(),
@@ -188,6 +187,7 @@ impl Connection {
                 span: tracing::Span::current(),
                 tx,
             })
+            .await
             .map_err(|_| worker_gone("apply migration channel closed"))?;
         rx.await
             .map_err(|_| worker_gone("apply migration worker dropped without replying"))?

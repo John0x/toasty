@@ -227,11 +227,9 @@ impl Drop for Transaction<'_> {
             // Fire-and-forget rollback: send the operation to the background
             // connection task without awaiting the response.
             let (tx, _rx) = oneshot::channel();
-            let _ = self
-                .conn
+            self.conn
                 .handle()
-                .in_tx
-                .send(ConnectionOperation::ExecOperation {
+                .send_detached(ConnectionOperation::ExecOperation {
                     operation: Box::new(op.into()),
                     span: tracing::Span::current(),
                     tx,

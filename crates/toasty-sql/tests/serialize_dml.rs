@@ -392,3 +392,38 @@ fn delete_with_returning_sqlite() {
         delete_stmt(true, returning),
     ));
 }
+
+/// `with_arg_types` writes each parameter's storage type on its PostgreSQL placeholder.
+#[test]
+fn postgresql_placeholders_with_arg_types() {
+    let schema = users_schema();
+    let target = InsertTarget::Table(InsertTable {
+        table: TableId(0),
+        columns: vec![
+            ColumnId {
+                table: TableId(0),
+                index: 0,
+            },
+            ColumnId {
+                table: TableId(0),
+                index: 1,
+            },
+        ],
+    });
+    let row = Expr::record([Expr::arg(0usize), Expr::arg(1usize)]);
+    let stmt: stmt::Statement = Insert {
+        target,
+        source: stmt::Query::values(Values::new(vec![row])),
+        upsert: None,
+        returning: None,
+    }
+    .into();
+    let types = [StorageType::Integer(8), StorageType::Text];
+    let sql = Serializer::postgresql(&schema)
+        .with_arg_types(&types)
+        .serialize(&SqlStatement::from(stmt));
+    assert_eq!(
+        sql,
+        "INSERT INTO \"users\" (\"id\", \"name\") VALUES ($1::BIGINT, $2::TEXT);"
+    );
+}

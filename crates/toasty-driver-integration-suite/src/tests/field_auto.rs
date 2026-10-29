@@ -262,3 +262,56 @@ pub async fn auto_increment_parent_with_batch_associations(test: &mut Test) -> R
 
     Ok(())
 }
+
+/// An `i64` auto-increment key referenced by an `i64` foreign key: loading the relation
+/// compares the two. The key keeps its width on every database (SQLite once narrowed it to a
+/// 32-bit `Integer(4)`, which the comparison couldn't cast).
+#[driver_test(requires(auto_increment))]
+pub async fn i64_auto_increment_key_referenced_by_a_foreign_key(t: &mut Test) -> Result<()> {
+    #[derive(Debug, toasty::Model)]
+    struct User {
+        #[key]
+        #[auto]
+        id: i64,
+        name: String,
+        #[has_many]
+        posts: toasty::Deferred<Vec<Post>>,
+    }
+
+    #[derive(Debug, toasty::Model)]
+    struct Post {
+        #[key]
+        #[auto]
+        id: i64,
+        #[index]
+        user_id: i64,
+        #[belongs_to(key = user_id, references = id)]
+        user: toasty::Deferred<User>,
+        title: String,
+    }
+
+    let mut db = t.setup_db(models!(User, Post)).await;
+
+    let user = toasty::create!(User { name: "Ada" }).exec(&mut db).await?;
+    toasty::create!(Post {
+        user_id: user.id,
+        title: "Hello"
+    })
+    .exec(&mut db)
+    .await?;
+
+    let user = User::filter_by_id(user.id)
+        .include(User::fields().posts())
+        .one()
+        .exec(&mut db)
+        .await?;
+    let titles: Vec<_> = user
+        .posts
+        .get()
+        .iter()
+        .map(|post| post.title.clone())
+        .collect();
+    assert_eq!(titles, ["Hello"]);
+
+    Ok(())
+}

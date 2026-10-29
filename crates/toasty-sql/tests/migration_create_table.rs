@@ -377,3 +377,32 @@ fn create_table_no_redundant_pk_index() {
     assert!(sql[0].starts_with("CREATE TABLE"), "got: {}", sql[0]);
     assert!(sql[0].contains("PRIMARY KEY"), "got: {}", sql[0]);
 }
+
+/// SQLite's `AUTOINCREMENT` requires the declared type `INTEGER`, which is 64-bit: an
+/// `Integer(8)` auto-increment key is spelled so.
+#[test]
+fn create_table_with_i64_auto_increment_key_sqlite() {
+    let mut id = make_column(0, 0, "id", Type::Integer(8));
+    id.ty = core_stmt::Type::I64;
+    id.auto_increment = true;
+    let from = Schema::default();
+    let to = Schema {
+        tables: vec![make_table(
+            0,
+            "users",
+            vec![id, make_column(0, 1, "name", Type::Text)],
+            vec![],
+        )],
+    };
+
+    let hints = diff::RenameHints::new();
+    let diff = diff::Schema::from(&from, &to, &hints);
+    let stmts = MigrationStatement::from_diff(&diff, &Capability::SQLITE);
+    let sql = serialize_migration(&stmts, "sqlite");
+
+    assert_eq!(sql.len(), 1);
+    assert_eq!(
+        sql[0],
+        "CREATE TABLE \"users\" (\n    \"id\" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    \"name\" TEXT NOT NULL\n);"
+    );
+}

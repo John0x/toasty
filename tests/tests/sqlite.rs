@@ -68,8 +68,10 @@ async fn in_memory_caps_user_max_pool_size() {
     assert_eq!(db.pool().status().max_size, 1);
 }
 
+/// SQLite's `INTEGER` is 64-bit: an `i64` auto-increment key keeps its width (the DDL
+/// spells it `INTEGER`, as `AUTOINCREMENT` requires).
 #[tokio::test]
-async fn auto_i64_key_uses_sqlite_integer_storage_type() {
+async fn auto_i64_key_keeps_its_width_on_sqlite() {
     let db = toasty::Db::builder()
         .models(toasty::models!(PoolItem))
         .build(toasty_driver_sqlite::Sqlite::in_memory())
@@ -78,6 +80,6 @@ async fn auto_i64_key_uses_sqlite_integer_storage_type() {
 
     let id = &db.schema().db.tables[0].columns[0];
 
-    assert_eq!(id.storage_ty, toasty::schema::db::Type::Integer(4));
+    assert_eq!(id.storage_ty, toasty::schema::db::Type::Integer(8));
     assert!(id.auto_increment);
 }

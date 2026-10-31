@@ -23,10 +23,9 @@ use toasty_core::driver::{Connection, Rows};
 #[cfg(feature = "migration")]
 use toasty_core::schema::db::{AppliedMigration, Migration};
 use toasty_core::stmt::Value;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, oneshot};
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use super::pool::SweepWaker;
@@ -96,7 +95,9 @@ pub(crate) struct ConnectionHandle {
 
 enum Mode {
     /// When dropped, `in_tx` closes the channel, causing the background task
-    /// to finish processing remaining messages and exit gracefully.
+    /// to finish processing remaining messages and exit gracefully. Not on
+    /// `wasm32`, which has no Tokio runtime to spawn tasks on.
+    #[cfg(not(target_arch = "wasm32"))]
     Task {
         in_tx: mpsc::UnboundedSender<ConnectionOperation>,
         join_handle: JoinHandle<()>,
@@ -117,6 +118,7 @@ impl ConnectionHandle {
     /// observes that the connection went bad so the pool's health-check
     /// sweep can escalate immediately rather than waiting for its next
     /// periodic tick.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn spawn(
         connection: Box<dyn Connection>,
         engine: Engine,
@@ -164,6 +166,7 @@ impl ConnectionHandle {
     /// gone.
     pub(crate) async fn send(&self, op: ConnectionOperation) -> Result<(), ConnectionGone> {
         match &self.mode {
+            #[cfg(not(target_arch = "wasm32"))]
             Mode::Task { in_tx, .. } => in_tx.send(op).map_err(|_| ConnectionGone),
             Mode::Inline {
                 task,
@@ -188,6 +191,7 @@ impl ConnectionHandle {
     /// inline, to run before the next operation.
     pub(crate) fn send_detached(&self, op: ConnectionOperation) {
         match &self.mode {
+            #[cfg(not(target_arch = "wasm32"))]
             Mode::Task { in_tx, .. } => {
                 let _ = in_tx.send(op);
             }
@@ -202,6 +206,7 @@ impl ConnectionHandle {
     /// dead slots.
     pub(crate) fn is_closed(&self) -> bool {
         match &self.mode {
+            #[cfg(not(target_arch = "wasm32"))]
             Mode::Task { in_tx, join_handle } => in_tx.is_closed() || join_handle.is_finished(),
             Mode::Inline { closed, .. } => closed.load(Ordering::Acquire),
         }
@@ -235,6 +240,7 @@ struct ConnectionTask {
 }
 
 impl ConnectionTask {
+    #[cfg(not(target_arch = "wasm32"))]
     async fn run(mut self) {
         while let Some(op) = self
             .in_rx

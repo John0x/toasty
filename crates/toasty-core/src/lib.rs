@@ -34,6 +34,9 @@ mod error;
 /// The error type returned by Toasty operations.
 pub use error::Error;
 
+pub mod maybe_send;
+pub use maybe_send::{MaybeSend, MaybeSync};
+
 /// Schema migration metadata shared by Toasty runtime and macros.
 #[cfg(feature = "migration")]
 pub mod migration;

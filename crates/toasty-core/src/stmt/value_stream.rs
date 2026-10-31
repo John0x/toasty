@@ -56,7 +56,10 @@ enum Buffer {
     Many(VecDeque<Value>),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type DynStream = Pin<Box<dyn Stream<Item = crate::Result<Value>> + Send + 'static>>;
+#[cfg(target_arch = "wasm32")]
+type DynStream = Pin<Box<dyn Stream<Item = crate::Result<Value>> + 'static>>;
 
 impl ValueStream {
     /// Creates a stream containing a single value.
@@ -69,7 +72,9 @@ impl ValueStream {
     }
 
     /// Creates a stream backed by an async [`Stream`] of `Result<Value>`.
-    pub fn from_stream<T: Stream<Item = crate::Result<Value>> + Send + 'static>(stream: T) -> Self {
+    pub fn from_stream<T: Stream<Item = crate::Result<Value>> + crate::MaybeSend + 'static>(
+        stream: T,
+    ) -> Self {
         Self {
             buffer: Buffer::Empty,
             stream: Some(Box::pin(stream)),
@@ -91,7 +96,7 @@ impl ValueStream {
     pub fn from_iter<T, I>(iter: I) -> Self
     where
         T: Into<Value>,
-        I: Iterator<Item = crate::Result<T>> + Send + 'static,
+        I: Iterator<Item = crate::Result<T>> + crate::MaybeSend + 'static,
     {
         Self::from_stream(Iter { iter })
     }

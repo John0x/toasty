@@ -238,7 +238,8 @@ impl Drop for Transaction<'_> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<'a> Executor for Transaction<'a> {
     async fn transaction(&mut self) -> Result<Transaction<'_>> {
         let depth = match self.savepoint {

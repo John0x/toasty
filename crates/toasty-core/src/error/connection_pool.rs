@@ -3,7 +3,7 @@ use super::Error;
 /// Error from a connection pool.
 #[derive(Debug)]
 pub(super) struct ConnectionPool {
-    pub(super) inner: Box<dyn std::error::Error + Send + Sync>,
+    pub(super) inner: crate::maybe_send::BoxError,
 }
 
 impl std::error::Error for ConnectionPool {
@@ -39,7 +39,9 @@ impl Error {
     /// let err = Error::connection_pool(io_err);
     /// assert!(err.is_connection_pool());
     /// ```
-    pub fn connection_pool(err: impl std::error::Error + Send + Sync + 'static) -> Error {
+    pub fn connection_pool(
+        err: impl std::error::Error + crate::MaybeSend + crate::MaybeSync + 'static,
+    ) -> Error {
         Error::from(super::ErrorKind::ConnectionPool(ConnectionPool {
             inner: Box::new(err),
         }))

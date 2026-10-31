@@ -1,6 +1,11 @@
 //! Connection pooling for database connections.
 
-use deadpool::managed::{Object, Timeouts};
+#[cfg(target_arch = "wasm32")]
+mod local;
+
+#[cfg(not(target_arch = "wasm32"))]
+use deadpool::managed::Object;
+use deadpool::managed::Timeouts;
 use std::{
     sync::{
         Arc,
@@ -10,6 +15,19 @@ use std::{
 };
 use toasty_core::driver::{Capability, ConnectContext, Driver, QueryLogConfig};
 use tokio::{sync::Notify, task::JoinHandle};
+
+/// The pool of connection handles: deadpool's, or on `wasm32`, where drivers
+/// need not be `Send` (deadpool needs them to be), a local one.
+#[cfg(not(target_arch = "wasm32"))]
+type Inner = deadpool::managed::Pool<Manager>;
+#[cfg(target_arch = "wasm32")]
+type Inner = local::LocalPool;
+
+/// A connection handle checked out of the pool, returned to it when dropped.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type PooledHandle = deadpool::managed::Object<Manager>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type PooledHandle = local::Object;
 
 use super::connection_task::{ConnectionHandle, ConnectionOperation};
 use crate::engine::Engine;
@@ -24,6 +42,7 @@ fn get_default_pool_max_size() -> usize {
 /// treating the connection as dead. Short enough that one stuck
 /// connection cannot stall the sweep loop; long enough to ride out a
 /// normal round-trip on a busy database.
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_SWEEP_PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for connection pool behavior.
@@ -61,7 +80,7 @@ impl Default for PoolConfig {
 /// A connection pool that manages database connections with background tasks.
 #[derive(Debug)]
 pub struct Pool {
-    inner: deadpool::managed::Pool<Manager>,
+    inner: Inner,
     capability: &'static Capability,
     /// Handle for the background health-check sweep, if one was spawned.
     /// Aborted on `Pool::drop` so the task does not outlive the pool.
@@ -104,7 +123,7 @@ impl Pool {
         let mut connect_cx = ConnectContext::default();
         connect_cx.query_log = config.query_log;
 
-        let inner = deadpool::managed::Pool::builder(Manager {
+        let manager = Manager {
             driver: Box::new(driver),
             engine,
             sweep_waker: sweep_waker.clone(),
@@ -113,16 +132,29 @@ impl Pool {
             max_connection_idle_time: config.max_connection_idle_time,
             connect_cx,
             inline: config.inline,
-        })
-        .runtime(deadpool::Runtime::Tokio1)
-        .max_size(effective_max)
-        .timeouts(config.timeouts)
-        .build()
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to build connection pool");
-            toasty_core::Error::connection_pool(e)
-        })?;
+        };
 
+        // `wasm32` has no Tokio runtime to spawn tasks on, and its drivers need
+        // not be `Send`: a local pool of inline connections, without timeouts or
+        // the background sweep.
+        #[cfg(target_arch = "wasm32")]
+        let (inner, sweep_task) = {
+            let _ = (config.timeouts, config.health_check_interval, sweep_waker);
+            (local::LocalPool::new(manager, effective_max), None)
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let inner = deadpool::managed::Pool::builder(manager)
+            .runtime(deadpool::Runtime::Tokio1)
+            .max_size(effective_max)
+            .timeouts(config.timeouts)
+            .build()
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to build connection pool");
+                toasty_core::Error::connection_pool(e)
+            })?;
+
+        #[cfg(not(target_arch = "wasm32"))]
         let sweep_task = config.health_check_interval.map(|interval| {
             let task = SweepTask {
                 pool: inner.clone(),
@@ -142,10 +174,13 @@ impl Pool {
 
     /// Retrieves a connection from the pool.
     pub(crate) async fn get(&self, shared: Arc<super::Shared>) -> crate::Result<super::Connection> {
+        #[cfg(not(target_arch = "wasm32"))]
         let connection = self.inner.get().await.map_err(|e| {
             tracing::debug!(error = %e, "failed to acquire connection from pool");
             toasty_core::Error::connection_pool(e)
         })?;
+        #[cfg(target_arch = "wasm32")]
+        let connection = self.inner.get().await?;
         Ok(super::Connection {
             inner: connection,
             shared,
@@ -180,6 +215,10 @@ pub(super) struct Manager {
     engine: Engine,
     sweep_waker: Arc<SweepWaker>,
     pre_ping: bool,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "connections are always inline on wasm32")
+    )]
     inline: bool,
     // Enforcing these caps needs the connection's age, which deadpool only
     // tracks off wasm32 (`std::time::Instant` has no wasm32 implementation).
@@ -206,11 +245,27 @@ impl std::fmt::Debug for Manager {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl deadpool::managed::Manager for Manager {
     type Type = ConnectionHandle;
     type Error = crate::Error;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
+        self.connect().await
+    }
+
+    async fn recycle(
+        &self,
+        obj: &mut Self::Type,
+        metrics: &deadpool::managed::Metrics,
+    ) -> deadpool::managed::RecycleResult<Self::Error> {
+        self.check(obj, metrics).await
+    }
+}
+
+impl Manager {
+    /// Opens a connection (deadpool's `Manager::create`).
+    async fn connect(&self) -> crate::Result<ConnectionHandle> {
         tracing::debug!("creating new pooled connection");
         let connection = self
             .driver
@@ -220,22 +275,24 @@ impl deadpool::managed::Manager for Manager {
                 tracing::debug!(error = %e, "failed to create database connection");
             })?;
         let (engine, sweep_waker) = (self.engine.clone(), self.sweep_waker.clone());
-        Ok(if self.inline {
-            ConnectionHandle::inline(connection, engine, sweep_waker)
-        } else {
-            ConnectionHandle::spawn(connection, engine, sweep_waker)
-        })
+        // Connections are always inline on `wasm32` (see `Pool::new`).
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.inline {
+            return Ok(ConnectionHandle::spawn(connection, engine, sweep_waker));
+        }
+        Ok(ConnectionHandle::inline(connection, engine, sweep_waker))
     }
 
-    async fn recycle(
+    /// Checks that `obj` can be used again (deadpool's `Manager::recycle`).
+    async fn check(
         &self,
-        obj: &mut Self::Type,
+        obj: &mut ConnectionHandle,
         #[cfg_attr(
             target_arch = "wasm32",
             expect(unused_variables, reason = "no timestamps on wasm32")
         )]
         metrics: &deadpool::managed::Metrics,
-    ) -> deadpool::managed::RecycleResult<Self::Error> {
+    ) -> deadpool::managed::RecycleResult<crate::Error> {
         // `Metrics::age()` and `Metrics::last_used()` only exist off wasm32:
         // deadpool records no timestamps there because `std::time::Instant`
         // has no wasm32 implementation, so neither cap can be enforced.
@@ -328,6 +385,7 @@ impl SweepWaker {
 /// Background task that periodically pings the longest-idle connection
 /// and escalates to a full idle-pool sweep on failure (either a failing
 /// periodic ping or a notify from a user-observed connection-lost).
+#[cfg(not(target_arch = "wasm32"))]
 struct SweepTask {
     pool: deadpool::managed::Pool<Manager>,
     waker: Arc<SweepWaker>,
@@ -339,6 +397,7 @@ struct SweepTask {
     last_serviced: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SweepTask {
     async fn run(mut self) {
         let mut ticker = tokio::time::interval(self.interval);

@@ -13,8 +13,9 @@ use toasty_core::{
 /// This trait is dyn-compatible. The generic [`exec`](dyn Executor::exec)
 /// method lives on `dyn Executor` and accepts any typed
 /// [`Statement<T>`](crate::Statement).
-#[async_trait]
-pub trait Executor: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Executor: toasty_core::MaybeSend + toasty_core::MaybeSync {
     /// Starts a (potentially nested) transaction.
     ///
     /// Takes `&mut self` so the executor is exclusively borrowed while the

@@ -12,7 +12,7 @@ use super::Error;
 /// the caller knows whether the operation is safe to retry.
 #[derive(Debug)]
 pub(super) struct ConnectionLost {
-    pub(super) inner: Box<dyn std::error::Error + Send + Sync>,
+    pub(super) inner: crate::maybe_send::BoxError,
 }
 
 impl std::error::Error for ConnectionLost {
@@ -69,7 +69,9 @@ impl Error {
     /// let err = Error::connection_lost(io_err);
     /// assert!(err.is_connection_lost());
     /// ```
-    pub fn connection_lost(err: impl std::error::Error + Send + Sync + 'static) -> Error {
+    pub fn connection_lost(
+        err: impl std::error::Error + crate::MaybeSend + crate::MaybeSync + 'static,
+    ) -> Error {
         Error::from(super::ErrorKind::ConnectionLost(ConnectionLost {
             inner: Box::new(err),
         }))

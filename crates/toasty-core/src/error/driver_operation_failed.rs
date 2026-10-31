@@ -10,7 +10,7 @@ use super::Error;
 /// - URL parsing errors for connection strings
 #[derive(Debug)]
 pub(super) struct DriverOperationFailed {
-    pub(super) inner: Box<dyn std::error::Error + Send + Sync>,
+    pub(super) inner: crate::maybe_send::BoxError,
 }
 
 impl std::error::Error for DriverOperationFailed {
@@ -47,7 +47,9 @@ impl Error {
     /// let err = Error::driver_operation_failed(io_err);
     /// assert!(err.is_driver_operation_failed());
     /// ```
-    pub fn driver_operation_failed(err: impl std::error::Error + Send + Sync + 'static) -> Error {
+    pub fn driver_operation_failed(
+        err: impl std::error::Error + crate::MaybeSend + crate::MaybeSync + 'static,
+    ) -> Error {
         Error::from(super::ErrorKind::DriverOperationFailed(
             DriverOperationFailed {
                 inner: Box::new(err),

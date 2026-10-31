@@ -81,6 +81,8 @@ use crate::schema::{
 
 use async_trait::async_trait;
 
+use crate::{MaybeSend, MaybeSync};
+
 use std::{borrow::Cow, fmt::Debug, sync::Arc};
 
 /// Per-connection configuration passed to [`Driver::connect`].
@@ -122,8 +124,12 @@ pub struct ConnectContext {
 ///
 /// let conn = driver.connect(&ConnectContext::default()).await.unwrap();
 /// ```
-#[async_trait]
-pub trait Driver: Debug + Send + Sync + 'static {
+///
+/// Drivers, connections and their futures are `Send` on native targets only:
+/// on `wasm32`, they may hold `!Send` clients (see [`crate::maybe_send`]).
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Driver: Debug + MaybeSend + MaybeSync + 'static {
     /// Returns the URL this driver is connecting to.
     fn url(&self) -> Cow<'_, str>;
 
@@ -167,8 +173,9 @@ pub trait Driver: Debug + Send + Sync + 'static {
 /// // Execute a transaction start operation on a connection:
 /// let response = conn.exec(&schema, Transaction::start().into()).await?;
 /// ```
-#[async_trait]
-pub trait Connection: Debug + Send + 'static {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait Connection: Debug + MaybeSend + 'static {
     /// Executes a database operation and returns the result.
     ///
     /// This is the single entry point for all database interactions. The

@@ -1,6 +1,6 @@
 use super::Transaction;
 use super::connection_task::{ConnectionHandle, ConnectionOperation};
-use super::pool::Manager;
+use super::pool::PooledHandle;
 use super::tx::ConnRef;
 
 use async_trait::async_trait;
@@ -47,7 +47,7 @@ fn worker_gone(failure: &'static str) -> crate::Error {
 ///
 /// When dropped, the connection is returned to the pool for reuse.
 pub struct Connection {
-    pub(super) inner: deadpool::managed::Object<Manager>,
+    pub(super) inner: PooledHandle,
     pub(super) shared: Arc<super::Shared>,
 }
 
@@ -194,7 +194,8 @@ impl Connection {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl super::Executor for Connection {
     async fn transaction(&mut self) -> crate::Result<Transaction<'_>> {
         Transaction::begin(ConnRef::Borrowed(self)).await

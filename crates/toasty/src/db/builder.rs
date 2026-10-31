@@ -64,6 +64,11 @@ impl Builder {
     /// or a runtime that isn't Tokio's. A connection is still used by one
     /// caller at a time; a dropped transaction's rollback runs before the
     /// connection's next operation.
+    ///
+    /// On `wasm32`, connections are always inline: there is no Tokio runtime
+    /// to spawn tasks on, and drivers need not be `Send` (see
+    /// [`toasty_core::maybe_send`]). Its pool has no background sweep and no
+    /// timeouts either.
     pub fn inline_connections(&mut self) -> &mut Self {
         self.pool.inline = true;
         self
@@ -113,7 +118,7 @@ impl Builder {
 
     /// Set the maximum time to wait for a free connection from the pool
     /// before returning an error. Passing `None` disables the timeout,
-    /// which is the default.
+    /// which is the default. Not on `wasm32`, which has no timer.
     pub fn pool_wait_timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
         self.pool.timeouts.wait = timeout;
         self
@@ -121,7 +126,7 @@ impl Builder {
 
     /// Set the maximum time allowed for establishing a new database
     /// connection. Passing `None` disables the timeout, which is the
-    /// default.
+    /// default. Not on `wasm32`, which has no timer.
     pub fn pool_create_timeout(&mut self, timeout: Option<Duration>) -> &mut Self {
         self.pool.timeouts.create = timeout;
         self
@@ -141,7 +146,8 @@ impl Builder {
     /// than one per pooled connection.
     ///
     /// Defaults to `Some(60s)`. Pass `None` to disable the sweep and
-    /// rely on passive error-driven recovery only.
+    /// rely on passive error-driven recovery only. There is no sweep on
+    /// `wasm32`.
     pub fn pool_health_check_interval(&mut self, interval: Option<Duration>) -> &mut Self {
         self.pool.health_check_interval = interval;
         self
@@ -300,6 +306,10 @@ impl Builder {
     ///     .unwrap();
     /// # });
     /// ```
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(clippy::arc_with_non_send_sync, reason = "wasm32 is single-threaded")
+    )]
     pub async fn build(&mut self, driver: impl Driver) -> Result<Db> {
         tracing::info!(models = self.models.len(), "building database schema");
         let capability = driver.capability();

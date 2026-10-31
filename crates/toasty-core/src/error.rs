@@ -243,6 +243,11 @@ impl core::fmt::Display for ErrorKind {
 }
 
 impl From<ErrorKind> for Error {
+    // On `wasm32`, errors' sources need not be `Send` (see `maybe_send`).
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(clippy::arc_with_non_send_sync, reason = "wasm32 is single-threaded")
+    )]
     fn from(kind: ErrorKind) -> Error {
         Error {
             inner: Arc::new(ErrorInner { kind, cause: None }),
